@@ -13,9 +13,9 @@
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 use tauri::{
+    plugin::{Builder as PluginBuilder, TauriPlugin},
     AppHandle, Manager, Monitor, PhysicalPosition, PhysicalSize, RunEvent, Runtime, WebviewWindow,
     Window, WindowEvent,
-    plugin::{Builder as PluginBuilder, TauriPlugin},
 };
 
 use std::{
@@ -29,6 +29,7 @@ mod cmd;
 
 type LabelMapperFn = dyn Fn(&str) -> &str + Send + Sync;
 type FilterCallbackFn = dyn Fn(&str) -> bool + Send + Sync;
+type PostReadyCallbackFn<R> = dyn Fn(&Window<R>) + Send + Sync;
 
 /// Default filename used to store window state.
 ///
@@ -340,20 +341,29 @@ impl<R: Runtime> WindowExtInternal for Window<R> {
 
 /// Builder for the window-state [plugin](TauriPlugin).
 #[derive(Default)]
-pub struct Builder {
+pub struct Builder<R: Runtime> {
     denylist: HashSet<String>,
     filter_callback: Option<Box<FilterCallbackFn>>,
+    post_window_ready_callback: Option<Box<PostReadyCallbackFn<R>>>,
     skip_initial_state: HashSet<String>,
     state_flags: StateFlags,
     map_label: Option<Box<LabelMapperFn>>,
     filename: Option<String>,
 }
 
-impl Builder {
+impl<R: Runtime> Builder<R> {
     /// Creates a new [`Builder`] with the default configuration:
     /// all [`StateFlags`] enabled, no denylist, no filter, and the [`DEFAULT_FILENAME`].
     pub fn new() -> Self {
-        Self::default()
+        Builder {
+            denylist: HashSet::<String>::default(),
+            filter_callback: Option::<Box<FilterCallbackFn>>::default(),
+            post_window_ready_callback: None,
+            skip_initial_state: HashSet::<String>::default(),
+            state_flags: StateFlags::default(),
+            map_label: Option::<Box<LabelMapperFn>>::default(),
+            filename: Option::<String>::default(),
+        }
     }
 
     /// Sets the state flags to control what state gets restored and saved.
@@ -385,6 +395,14 @@ impl Builder {
         self
     }
 
+    pub fn with_post_ready<F>(mut self, post_ready_callback: F) -> Self
+    where
+        F: Fn(&Window<R>) + Send + Sync + 'static,
+    {
+        self.post_window_ready_callback = Some(Box::new(post_ready_callback));
+        self
+    }
+
     /// Adds the given window label to a list of windows to skip initial state restore.
     pub fn skip_initial_state(mut self, label: &str) -> Self {
         self.skip_initial_state.insert(label.into());
@@ -408,7 +426,7 @@ impl Builder {
     /// state when it becomes ready (unless denylisted, filtered out, or opted out with
     /// [`Builder::skip_initial_state`]), tracks move/resize events to keep the state up to date,
     /// and saves the state of all windows to disk when the app exits.
-    pub fn build<R: Runtime>(self) -> TauriPlugin<R> {
+    pub fn build(self) -> TauriPlugin<R> {
         let state_flags = self.state_flags;
         let filename = self.filename.unwrap_or_else(|| DEFAULT_FILENAME.into());
         let map_label = self.map_label;
@@ -468,6 +486,10 @@ impl Builder {
                         .unwrap()
                         .entry(label.clone())
                         .or_insert_with(WindowState::default);
+                }
+
+                if let Some(post_ready_callback) = &self.post_window_ready_callback {
+                    post_ready_callback(&window);
                 }
 
                 window.on_window_event(move |e| match e {
